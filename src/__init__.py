@@ -21,16 +21,18 @@
 # License: GNU AGPL, version 3 or later;
 # See http://www.gnu.org/licenses/agpl.html
 
-from aqt.editor import Editor
-from anki.hooks import wrap
+from aqt import mw
+from aqt.qt import QAction
 
 from .utils import openChangelog
 from .utils import uuid  # duplicate UUID checked here
 from .utils import debugLog  # debug log registered here
 
+from .dialog import undoRescheduleGUI
 
-def onLoadNote(self, focusTo=None):
-    pass
+# ----------------------------------------------------------------------------
+# Add menu
 
-
-Editor.loadNote = wrap(Editor.loadNote, onLoadNote, "after")
+action = QAction("Undo reschedule cards on change...", mw)
+action.triggered.connect(undoRescheduleGUI)
+mw.form.menuTools.addAction(action)
