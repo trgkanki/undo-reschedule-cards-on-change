@@ -13,6 +13,7 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+import time
 from dataclasses import dataclass, field
 from itertools import groupby
 
@@ -26,6 +27,8 @@ from .utils.debugLog import log
 # RevlogReviewKind (rslib/src/revlog/mod.rs).
 REVLOG_FILTERED = 3
 # Written by 'Set due date' (non-zero factor) and 'Forget' (factor 0).
+# Undo rows are written as this kind with non-zero factor, like 'Set due date'.
+# FSRS Helper's after-sync reschedule/disperse ignores manual entries.
 REVLOG_MANUAL = 4
 # Written by FSRS "Reschedule cards on change".
 REVLOG_RESCHEDULED = 5
@@ -166,6 +169,83 @@ def planUndoReschedule(col, deckId, cutoffMs):
         plan.items.append(RestoreItem(card, targetIvl, targetDue))
 
     return plan
+
+
+def revlogFactor(card):
+    """Same as Anki's log_scheduled_review: FSRS difficulty or SM-2 ease.
+
+    Kept non-zero, as a manual entry with factor 0 means 'Forget'.
+    """
+    if card.memory_state:
+        factor = int(((card.memory_state.difficulty - 1) / 9 + 0.1) * 1000)
+    else:
+        factor = card.factor
+    return max(factor, 1)
+
+
+def applyUndoReschedule(col, plan):
+    """Apply the plan and log each restored card as a manual revlog entry.
+
+    Not undoable: the raw revlog insert clears Anki's undo history.
+    """
+    if not plan.items:
+        return OpChanges()
+
+    usn = col.usn()
+    nextId = max(
+        int(time.time() * 1000), (col.db.scalar("select max(id) from revlog") or 0) + 1
+    )
+
+    cards = []
+    revlogRows = []
+    for item in plan.items:
+        card = item.card
+        revlogRows.append(
+            (
+                nextId,
+                card.id,
+                usn,
+                0,  # ease
+                item.targetIvl,
+                card.ivl,  # lastIvl
+                revlogFactor(card),
+                0,  # time
+                REVLOG_MANUAL,
+            )
+        )
+        nextId += 1
+
+        card.ivl = item.targetIvl
+        if card.odid:
+            card.odue = item.targetDue
+        else:
+            card.due = item.targetDue
+        cards.append(card)
+
+    result = {}
+
+    def op():
+        result["changes"] = col.update_cards(cards)
+        # Must come after update_cards: this raw write clears the undo stack,
+        # including update_cards' entry, so Ctrl+Z can't revert cards alone.
+        col.db.executemany(
+            "insert into revlog (id, cid, usn, ease, ivl, lastIvl, factor, time, type)"
+            " values (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            revlogRows,
+        )
+
+    col.db.transact(op)
+
+    log(
+        "applyUndoReschedule: restored %d, skipped %d changed / %d not review, %d already restored"
+        % (
+            len(cards),
+            plan.skippedChanged,
+            plan.skippedNotReview,
+            plan.alreadyRestored,
+        )
+    )
+    return result["changes"]
 
 
 def undoReschedule(col, deckId, cutoffMs):
