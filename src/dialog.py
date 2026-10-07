@@ -23,14 +23,59 @@ from aqt.qt import (
     QLabel,
     QListWidget,
     QListWidgetItem,
+    QPalette,
     Qt,
     QVBoxLayout,
 )
 from aqt.utils import showInfo
 
-from .undoResched import getCutoffMs, undoReschedule
+from .undoResched import (
+    getCutoffMs,
+    getRescheduleCountsByDay,
+    getRescheduledCardCount,
+    undoReschedule,
+)
+
+import datetime
 
 ALL_DECKS_LABEL = "(All decks)"
+
+
+def ankiToday():
+    """Today's date as Anki sees it (honoring rollover hour)."""
+    d = datetime.date.fromtimestamp(mw.col.sched.day_cutoff - 86400)
+    return QDate(d.year, d.month, d.day)
+
+
+class RescheduleCalendar(QCalendarWidget):
+    """Calendar showing the number of rescheduled cards in each day cell."""
+
+    def __init__(self):
+        super().__init__()
+        self.counts = {}  # julian day -> count
+
+    def setCounts(self, counts):
+        self.counts = counts
+        self.updateCells()
+
+    def paintCell(self, painter, rect, date):
+        super().paintCell(painter, rect, date)
+        count = self.counts.get(date.toJulianDay())
+        if not count:
+            return
+
+        painter.save()
+        font = painter.font()
+        font.setPointSizeF(font.pointSizeF() * 0.7)
+        font.setBold(True)
+        painter.setFont(font)
+        painter.setPen(self.palette().color(QPalette.ColorRole.Link))
+        painter.drawText(
+            rect.adjusted(2, 1, -3, -1),
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom,
+            str(count),
+        )
+        painter.restore()
 
 
 class UndoRescheduleDialog(QDialog):
@@ -42,10 +87,14 @@ class UndoRescheduleDialog(QDialog):
         layout = QVBoxLayout(self)
 
         layout.addWidget(QLabel("Undo reschedules done since:"))
-        self.calendar = QCalendarWidget()
-        self.calendar.setMaximumDate(QDate.currentDate())
-        self.calendar.setSelectedDate(QDate.currentDate())
+        self.calendar = RescheduleCalendar()
+        self.calendar.setMaximumDate(ankiToday())
+        self.calendar.setSelectedDate(ankiToday())
+        self.calendar.selectionChanged.connect(self.updateSummary)
         layout.addWidget(self.calendar)
+
+        self.summary = QLabel()
+        layout.addWidget(self.summary)
 
         layout.addWidget(QLabel("Target deck (subdecks included):"))
         self.deckList = QListWidget()
@@ -58,6 +107,7 @@ class UndoRescheduleDialog(QDialog):
             self.deckList.addItem(item)
         self.deckList.setCurrentRow(0)
         self.deckList.itemDoubleClicked.connect(self.accept)
+        self.deckList.currentRowChanged.connect(self.updateCounts)
         layout.addWidget(self.deckList)
 
         note = QLabel(
@@ -75,12 +125,33 @@ class UndoRescheduleDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
+        self.updateCounts()
+
+    def updateCounts(self):
+        todayJd = ankiToday().toJulianDay()
+        countsByDay = getRescheduleCountsByDay(mw.col, self.selectedDeckId())
+        self.calendar.setCounts(
+            {todayJd - daysAgo: count for daysAgo, count in countsByDay.items()}
+        )
+        self.updateSummary()
+
+    def updateSummary(self):
+        date = self.calendar.selectedDate()
+        countOnDay = self.calendar.counts.get(date.toJulianDay(), 0)
+        countSince = getRescheduledCardCount(
+            mw.col, self.selectedDeckId(), getCutoffMs(mw.col, self.daysAgo())
+        )
+        self.summary.setText(
+            "%s: %d cards rescheduled on this day, %d since"
+            % (date.toString(Qt.DateFormat.ISODate), countOnDay, countSince)
+        )
+
     def selectedDeckId(self):
         item = self.deckList.currentItem()
         return item.data(Qt.ItemDataRole.UserRole) if item else None
 
     def daysAgo(self):
-        return self.calendar.selectedDate().daysTo(QDate.currentDate())
+        return self.calendar.selectedDate().daysTo(ankiToday())
 
 
 def undoRescheduleGUI():

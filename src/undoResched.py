@@ -50,6 +50,31 @@ def deckFilterSql(col, deckId):
     return f" and cid in (select id from cards where did in {dids} or odid in {dids})"
 
 
+def getRescheduleCountsByDay(col, deckId):
+    """{daysAgo: number of cards rescheduled on that Anki day}"""
+    dayEndMs = col.sched.day_cutoff * 1000
+    return dict(
+        col.db.all(
+            "select (? - id - 1) / 86400000 as daysAgo, count(distinct cid)"
+            " from revlog where type = ?"
+            + deckFilterSql(col, deckId)
+            + " group by daysAgo",
+            dayEndMs,
+            REVLOG_RESCHEDULED,
+        )
+    )
+
+
+def getRescheduledCardCount(col, deckId, cutoffMs):
+    """Number of cards rescheduled since cutoffMs."""
+    return col.db.scalar(
+        "select count(distinct cid) from revlog where type = ? and id >= ?"
+        + deckFilterSql(col, deckId),
+        REVLOG_RESCHEDULED,
+        cutoffMs,
+    )
+
+
 def undoReschedule(col, deckId, cutoffMs):
     """Revert 'reschedule cards on change' done since cutoffMs.
 
