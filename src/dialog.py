@@ -86,16 +86,6 @@ class UndoRescheduleDialog(QDialog):
 
         layout = QVBoxLayout(self)
 
-        layout.addWidget(QLabel("Undo reschedules done on or after:"))
-        self.calendar = RescheduleCalendar()
-        self.calendar.setMaximumDate(ankiToday())
-        self.calendar.setSelectedDate(ankiToday())
-        self.calendar.selectionChanged.connect(self.updateSummary)
-        layout.addWidget(self.calendar)
-
-        self.summary = QLabel()
-        layout.addWidget(self.summary)
-
         layout.addWidget(QLabel("Target deck (subdecks included):"))
         self.deckList = QListWidget()
         allItem = QListWidgetItem(ALL_DECKS_LABEL)
@@ -109,6 +99,16 @@ class UndoRescheduleDialog(QDialog):
         self.deckList.itemDoubleClicked.connect(self.accept)
         self.deckList.currentRowChanged.connect(self.updateCounts)
         layout.addWidget(self.deckList)
+
+        layout.addWidget(QLabel("Undo reschedules done on or after:"))
+        self.calendar = RescheduleCalendar()
+        self.calendar.setMaximumDate(ankiToday())
+        self.calendar.setSelectedDate(ankiToday())
+        self.calendar.selectionChanged.connect(self.updateSummary)
+        layout.addWidget(self.calendar)
+
+        self.summary = QLabel()
+        layout.addWidget(self.summary)
 
         note = QLabel(
             "Cards rescheduled by 'Reschedule cards on change' on or after the "
