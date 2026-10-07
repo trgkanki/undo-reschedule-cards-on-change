@@ -19,7 +19,7 @@ from itertools import groupby
 
 from anki.cards import Card
 from anki.collection import OpChanges
-from anki.consts import CARD_TYPE_REV
+from anki.consts import CARD_TYPE_REV, QUEUE_TYPE_REV
 from anki.utils import ids2str
 
 from .utils.debugLog import log
@@ -32,14 +32,6 @@ REVLOG_FILTERED = 3
 REVLOG_MANUAL = 4
 # Written by FSRS "Reschedule cards on change".
 REVLOG_RESCHEDULED = 5
-
-
-@dataclass
-class UndoRescheduleResult:
-    changes: OpChanges = None
-    restored: int = 0
-    skippedReviewed: int = 0
-    skippedModified: int = 0
 
 
 @dataclass
@@ -171,6 +163,15 @@ def planUndoReschedule(col, deckId, cutoffMs):
     return plan
 
 
+def dueTodayCounts(col, plan):
+    """(before, after) number of planned cards due today."""
+    today = col.sched.today
+    reviewQueue = [it for it in plan.items if it.card.queue == QUEUE_TYPE_REV]
+    before = sum(1 for it in reviewQueue if cardDue(it.card) <= today)
+    after = sum(1 for it in reviewQueue if it.targetDue <= today)
+    return before, after
+
+
 def revlogFactor(card):
     """Same as Anki's log_scheduled_review: FSRS difficulty or SM-2 ease.
 
@@ -246,74 +247,3 @@ def applyUndoReschedule(col, plan):
         )
     )
     return result["changes"]
-
-
-def undoReschedule(col, deckId, cutoffMs):
-    """Revert 'reschedule cards on change' done since cutoffMs.
-
-    deckId=None means all decks. Subdecks are included.
-    Cards with any non-reschedule revlog entry since cutoff are skipped.
-    """
-    result = UndoRescheduleResult()
-
-    cardIds = col.db.list(
-        "select distinct cid from revlog where type = ? and id >= ?"
-        + deckFilterSql(col, deckId),
-        REVLOG_RESCHEDULED,
-        cutoffMs,
-    )
-
-    changedCards = []
-    for cid in cardIds:
-        rows = col.db.all(
-            "select type, ivl, lastIvl from revlog where cid = ? and id >= ? order by id",
-            cid,
-            cutoffMs,
-        )
-        if any(rType != REVLOG_RESCHEDULED for rType, _, _ in rows):
-            result.skippedReviewed += 1
-            continue
-
-        try:
-            card = col.get_card(cid)
-        except Exception:
-            # Card might have been deleted after rescheduling
-            continue
-
-        lastIvl = rows[-1][1]
-        if card.type != CARD_TYPE_REV or card.ivl != lastIvl:
-            # Changed by something else since, or already undone.
-            result.skippedModified += 1
-            continue
-
-        origIvl = rows[0][2]
-        if origIvl <= 0:
-            # lastIvl < 0 means learning step (seconds); shouldn't happen for review cards.
-            result.skippedModified += 1
-            continue
-
-        shift = origIvl - card.ivl
-        if card.odid:
-            card.odue += shift
-        else:
-            card.due += shift
-        card.ivl = origIvl
-        changedCards.append(card)
-
-    log(
-        "undoReschedule(%s, %d): restored %d, skipped %d reviewed / %d modified"
-        % (
-            deckId,
-            cutoffMs,
-            len(changedCards),
-            result.skippedReviewed,
-            result.skippedModified,
-        )
-    )
-
-    undoEntry = col.add_custom_undo_entry("Undo Reschedule Cards on Change")
-    if changedCards:
-        col.update_cards(changedCards)
-    result.changes = col.merge_undo_entries(undoEntry)
-    result.restored = len(changedCards)
-    return result

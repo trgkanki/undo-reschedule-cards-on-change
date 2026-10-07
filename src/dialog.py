@@ -14,7 +14,7 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 from aqt import mw
-from aqt.operations import CollectionOp
+from aqt.operations import CollectionOp, QueryOp
 from aqt.qt import (
     QCalendarWidget,
     QDate,
@@ -27,13 +27,15 @@ from aqt.qt import (
     Qt,
     QVBoxLayout,
 )
-from aqt.utils import showInfo
+from aqt.utils import askUser, showInfo
 
 from .undoResched import (
+    applyUndoReschedule,
+    dueTodayCounts,
     getCutoffMs,
     getRescheduleCountsByDay,
     getRescheduledCardCount,
-    undoReschedule,
+    planUndoReschedule,
 )
 
 import datetime
@@ -112,9 +114,13 @@ class UndoRescheduleDialog(QDialog):
 
         note = QLabel(
             "Cards rescheduled by 'Reschedule cards on change' on or after the "
-            "selected date get their previous interval and due date back. Cards "
-            "that were reviewed (or otherwise changed) since then are skipped."
+            "selected date get the interval they had before that, with the due date "
+            "counted from their last review. Cards reviewed or manually rescheduled "
+            "since then are skipped. Each restored card is logged as a manual "
+            "entry in its review history.<br><br>"
+            "<b>This can't be undone with Ctrl+Z.</b> A backup is created first."
         )
+        note.setTextFormat(Qt.TextFormat.RichText)
         note.setWordWrap(True)
         layout.addWidget(note)
 
@@ -163,16 +169,63 @@ def undoRescheduleGUI():
 
     deckId = dlg.selectedDeckId()
     cutoffMs = getCutoffMs(mw.col, dlg.daysAgo())
+    dateStr = dlg.calendar.selectedDate().toString(Qt.DateFormat.ISODate)
 
-    def onSuccess(result):
+    def plan(col):
+        p = planUndoReschedule(col, deckId, cutoffMs)
+        return p, dueTodayCounts(col, p)
+
+    QueryOp(
+        parent=mw,
+        op=plan,
+        success=lambda result: confirmAndApply(dateStr, *result),
+    ).with_progress().run_in_background()
+
+
+def skippedHtml(plan, dateStr):
+    return (
+        "Skipped:"
+        "<br>&nbsp;&nbsp;- %d reviewed or manually changed since %s"
+        "<br>&nbsp;&nbsp;- %d not in review state"
+        "<br>&nbsp;&nbsp;- %d already restored"
+        % (plan.skippedChanged, dateStr, plan.skippedNotReview, plan.alreadyRestored)
+    )
+
+
+def confirmAndApply(dateStr, plan, dueCounts):
+    if not plan.items:
         showInfo(
-            "[Undo reschedule] Restored %d cards.\n\n"
-            "Skipped %d cards reviewed since the date, "
-            "%d cards changed by something else (or already restored)."
-            % (result.restored, result.skippedReviewed, result.skippedModified),
+            "<p>Nothing to restore.</p><p>%s</p>" % skippedHtml(plan, dateStr),
             parent=mw,
+            textFormat="rich",
+        )
+        return
+
+    dueBefore, dueAfter = dueCounts
+    if not askUser(
+        "<p>Restore %d cards to their state before %s.<br>"
+        "Due today among them: %d → %d</p>"
+        "<p>%s</p>"
+        "<p><b>This can't be undone with Ctrl+Z, and it clears Anki's undo history.</b><br>"
+        "A backup is created first.</p>"
+        "<p>Continue?</p>"
+        % (len(plan.items), dateStr, dueBefore, dueAfter, skippedHtml(plan, dateStr)),
+        parent=mw,
+        defaultno=True,
+        title="Undo Reschedule Cards on Change",
+    ):
+        return
+
+    def apply(col):
+        mw.create_backup_now()
+        return applyUndoReschedule(col, plan)
+
+    def onSuccess(_):
+        showInfo(
+            "<p>Restored %d cards to their state before %s.</p><p>%s</p>"
+            % (len(plan.items), dateStr, skippedHtml(plan, dateStr)),
+            parent=mw,
+            textFormat="rich",
         )
 
-    CollectionOp(
-        parent=mw, op=lambda col: undoReschedule(col, deckId, cutoffMs)
-    ).success(onSuccess).run_in_background()
+    CollectionOp(parent=mw, op=apply).success(onSuccess).run_in_background()
