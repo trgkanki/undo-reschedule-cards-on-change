@@ -86,7 +86,7 @@ class UndoRescheduleDialog(QDialog):
 
         layout = QVBoxLayout(self)
 
-        layout.addWidget(QLabel("Undo reschedules done since:"))
+        layout.addWidget(QLabel("Undo reschedules done on or after:"))
         self.calendar = RescheduleCalendar()
         self.calendar.setMaximumDate(ankiToday())
         self.calendar.setSelectedDate(ankiToday())
@@ -111,9 +111,9 @@ class UndoRescheduleDialog(QDialog):
         layout.addWidget(self.deckList)
 
         note = QLabel(
-            "Cards rescheduled by 'Reschedule cards on change' since the selected "
-            "date get their previous interval and due date back. Cards that were "
-            "reviewed (or otherwise changed) since then are skipped."
+            "Cards rescheduled by 'Reschedule cards on change' on or after the "
+            "selected date get their previous interval and due date back. Cards "
+            "that were reviewed (or otherwise changed) since then are skipped."
         )
         note.setWordWrap(True)
         layout.addWidget(note)
@@ -137,13 +137,15 @@ class UndoRescheduleDialog(QDialog):
 
     def updateSummary(self):
         date = self.calendar.selectedDate()
+        dateStr = date.toString(Qt.DateFormat.ISODate)
         countOnDay = self.calendar.counts.get(date.toJulianDay(), 0)
         countSince = getRescheduledCardCount(
             mw.col, self.selectedDeckId(), getCutoffMs(mw.col, self.daysAgo())
         )
         self.summary.setText(
-            "%s: %d cards rescheduled on this day, %d since"
-            % (date.toString(Qt.DateFormat.ISODate), countOnDay, countSince)
+            "Rescheduled on %s: %d cards\n"
+            "Rescheduled on or after %s: %d cards"
+            % (dateStr, countOnDay, dateStr, countSince)
         )
 
     def selectedDeckId(self):
