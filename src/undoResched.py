@@ -39,6 +39,17 @@ def getCutoffMs(col, daysAgo):
     return (col.sched.day_cutoff - 86400 * (daysAgo + 1)) * 1000
 
 
+def deckFilterSql(col, deckId):
+    """SQL fragment restricting revlog rows to deckId and its subdecks.
+
+    deckId=None means all decks.
+    """
+    if deckId is None:
+        return ""
+    dids = ids2str(col.decks.deck_and_child_ids(deckId))
+    return f" and cid in (select id from cards where did in {dids} or odid in {dids})"
+
+
 def undoReschedule(col, deckId, cutoffMs):
     """Revert 'reschedule cards on change' done since cutoffMs.
 
@@ -48,16 +59,11 @@ def undoReschedule(col, deckId, cutoffMs):
     result = UndoRescheduleResult()
 
     cardIds = col.db.list(
-        "select distinct cid from revlog where type = ? and id >= ?",
+        "select distinct cid from revlog where type = ? and id >= ?"
+        + deckFilterSql(col, deckId),
         REVLOG_RESCHEDULED,
         cutoffMs,
     )
-    if deckId is not None:
-        dids = ids2str(col.decks.deck_and_child_ids(deckId))
-        deckCardIds = set(
-            col.db.list(f"select id from cards where did in {dids} or odid in {dids}")
-        )
-        cardIds = [cid for cid in cardIds if cid in deckCardIds]
 
     changedCards = []
     for cid in cardIds:
