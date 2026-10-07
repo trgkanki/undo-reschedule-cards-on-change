@@ -13,15 +13,20 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from itertools import groupby
 
+from anki.cards import Card
 from anki.collection import OpChanges
 from anki.consts import CARD_TYPE_REV
 from anki.utils import ids2str
 
 from .utils.debugLog import log
 
-# RevlogReviewKind::Rescheduled (rslib/src/revlog/mod.rs).
+# RevlogReviewKind (rslib/src/revlog/mod.rs).
+REVLOG_FILTERED = 3
+# Written by 'Set due date' (non-zero factor) and 'Forget' (factor 0).
+REVLOG_MANUAL = 4
 # Written by FSRS "Reschedule cards on change".
 REVLOG_RESCHEDULED = 5
 
@@ -32,6 +37,21 @@ class UndoRescheduleResult:
     restored: int = 0
     skippedReviewed: int = 0
     skippedModified: int = 0
+
+
+@dataclass
+class RestoreItem:
+    card: Card
+    targetIvl: int
+    targetDue: int
+
+
+@dataclass
+class UndoReschedulePlan:
+    items: list = field(default_factory=list)
+    skippedChanged: int = 0
+    skippedNotReview: int = 0
+    alreadyRestored: int = 0
 
 
 def getCutoffMs(col, daysAgo):
@@ -73,6 +93,79 @@ def getRescheduledCardCount(col, deckId, cutoffMs):
         REVLOG_RESCHEDULED,
         cutoffMs,
     )
+
+
+def getLastReviewSecs(revlogRows):
+    """Time of the last rating that affects scheduling, or None.
+
+    Mirrors get_last_revlog_info (rslib/src/scheduler/fsrs/memory_state.rs).
+    """
+    lastReview = None
+    for rid, rType, ease, _, _, factor in revlogRows:
+        if 1 <= ease <= 4 and not (rType == REVLOG_FILTERED and factor == 0):
+            lastReview = rid // 1000
+        elif rType == REVLOG_MANUAL and factor == 0:
+            # 'Forget' resets the card
+            lastReview = None
+    return lastReview
+
+
+def cardDue(card):
+    return card.odue if card.odid else card.due
+
+
+def planUndoReschedule(col, deckId, cutoffMs):
+    """Plan restoring cards rescheduled since cutoffMs to their state before that.
+
+    deckId=None means all decks. Subdecks are included.
+    The target interval is lastIvl of the first reschedule since cutoff, whatever
+    happened to the card's interval since (e.g. unlogged changes by other add-ons).
+    Cards with any non-reschedule revlog entry since cutoff are skipped.
+    """
+    plan = UndoReschedulePlan()
+
+    revlogs = col.db.all(
+        "select cid, id, type, ease, ivl, lastIvl, factor from revlog"
+        " where cid in (select distinct cid from revlog where type = ? and id >= ?"
+        + deckFilterSql(col, deckId)
+        + ") order by cid, id",
+        REVLOG_RESCHEDULED,
+        cutoffMs,
+    )
+
+    for cid, group in groupby(revlogs, key=lambda r: r[0]):
+        rows = [r[1:] for r in group]
+        sinceCutoff = [r for r in rows if r[0] >= cutoffMs]
+        if any(rType != REVLOG_RESCHEDULED for _, rType, *_ in sinceCutoff):
+            plan.skippedChanged += 1
+            continue
+
+        try:
+            card = col.get_card(cid)
+        except Exception:
+            # Card might have been deleted after rescheduling
+            continue
+
+        targetIvl = sinceCutoff[0][4]
+        if card.type != CARD_TYPE_REV or targetIvl <= 0:
+            # lastIvl < 0 means learning step (seconds); shouldn't happen for review cards.
+            plan.skippedNotReview += 1
+            continue
+
+        lastReviewSecs = getLastReviewSecs(rows)
+        if lastReviewSecs is None:
+            targetDue = cardDue(card) + targetIvl - card.ivl
+        else:
+            daysElapsed = max(col.sched.day_cutoff - lastReviewSecs, 0) // 86400
+            targetDue = col.sched.today - daysElapsed + targetIvl
+
+        if card.ivl == targetIvl and cardDue(card) == targetDue:
+            plan.alreadyRestored += 1
+            continue
+
+        plan.items.append(RestoreItem(card, targetIvl, targetDue))
+
+    return plan
 
 
 def undoReschedule(col, deckId, cutoffMs):
